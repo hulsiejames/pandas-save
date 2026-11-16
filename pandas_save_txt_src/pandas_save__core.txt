@@ -1,0 +1,288 @@
+"""Core functionality module."""
+
+# # # # IMPORTS # # # #
+from __future__ import annotations
+
+# Built-Ins
+import os
+import shutil
+import tempfile
+import uuid
+from pathlib import Path
+from collections.abc import Any, Callable, Iterable
+
+
+# # # # CONSTANTS # # # #
+# Add any mapped network-drive roots used in your organisation.
+# UNC paths are detected automatically.
+DEFAULT_NETWORK_ROOTS = (
+    Path(r"A:\\"),
+    Path(r"B:\\"),
+    Path(r"F:\\"),
+    Path(r"G:\\"),
+    Path(r"I:\\"),  # TfN translations (and caf.) dir
+    Path(r"J:\\"),
+    Path(r"K:\\"),
+    Path(r"L:\\"),
+    Path(r"M:\\"),
+    Path(r"N:\\"),
+    Path(r"O:\\"),
+    Path(r"P:\\"),
+    Path(r"R:\\"),
+    Path(r"S:\\"),
+    Path(r"T:\\"),  # TfN Transfer drive
+    Path(r"U:\\"),
+    Path(r"V:\\"),
+    Path(r"W:\\"),
+    Path(r"X:\\"),
+    Path(r"Y:\\"),  # TfN Shared drive
+    Path(r"Z:\\"),
+)
+
+
+# # # # FUNTIONS # # # #
+
+def is_network_path(
+    path: str | os.PathLike,
+    network_roots: Iterable[str | os.PathLike] = DEFAULT_NETWORK_ROOTS,
+) -> bool:
+    """
+    Determine whether a path should be treated as network storage.
+
+    UNC paths are detected automatically. Mapped drives must be supplied
+    through ``network_roots`` because Path cannot reliably determine whether
+    a Windows drive letter is backed by a local disk or network share.
+    """
+    raw_path = os.fspath(path)
+
+    if raw_path.startswith(("\\\\", "//")):
+        return True
+
+    absolute_path = os.path.normcase(os.path.abspath(raw_path))
+
+    for root in network_roots:
+        absolute_root = os.path.normcase(os.path.abspath(os.fspath(root)))
+
+        try:
+            if os.path.commonpath([absolute_path, absolute_root]) == absolute_root:
+                return True
+        except ValueError:
+            # Paths are on different Windows drives.
+            continue
+
+    return False
+
+
+def _copy_file_safely(
+    source: Path,
+    destination: Path,
+    overwrite: bool,
+) -> None:
+    """
+    Copy one file to a temporary network filename and then rename it.
+
+    The final filename does not appear until the copy has completed.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    if destination.exists() and not overwrite:
+        raise FileExistsError(f"Destination already exists: {destination}")
+
+    partial_path = destination.with_name(
+        f".{destination.name}.{uuid.uuid4().hex}.partial"
+    )
+
+    try:
+        shutil.copy2(source, partial_path)
+        os.replace(partial_path, destination)
+    except Exception:
+        partial_path.unlink(missing_ok=True)
+        raise
+
+
+def _copy_directory_safely(
+    source: Path,
+    destination: Path,
+    overwrite: bool,
+) -> None:
+    """
+    Copy a directory to a temporary destination and then rename it.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    if destination.exists() and not overwrite:
+        raise FileExistsError(f"Destination already exists: {destination}")
+
+    partial_path = destination.with_name(
+        f".{destination.name}.{uuid.uuid4().hex}.partial"
+    )
+
+    try:
+        shutil.copytree(source, partial_path)
+
+        if destination.exists():
+            if destination.is_dir():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink()
+
+        os.replace(partial_path, destination)
+
+    except Exception:
+        if partial_path.exists():
+            if partial_path.is_dir():
+                shutil.rmtree(partial_path, ignore_errors=True)
+            else:
+                partial_path.unlink(missing_ok=True)
+        raise
+
+
+def _copy_shapefile_safely(
+    local_shapefile: Path,
+    destination_shapefile: Path,
+    overwrite: bool,
+) -> None:
+    """
+    Copy every sidecar belonging to an ESRI Shapefile.
+
+    This includes files such as .shp, .shx, .dbf, .prj and .cpg.
+    """
+    destination_shapefile.parent.mkdir(parents=True, exist_ok=True)
+
+    local_components = list(
+        local_shapefile.parent.glob(f"{local_shapefile.stem}.*")
+    )
+
+    if not local_components:
+        raise FileNotFoundError(
+            f"No shapefile components were produced for {local_shapefile}"
+        )
+
+    if not overwrite:
+        existing_components = list(
+            destination_shapefile.parent.glob(
+                f"{destination_shapefile.stem}.*"
+            )
+        )
+
+        if existing_components:
+            raise FileExistsError(
+                "Destination shapefile components already exist: "
+                f"{destination_shapefile}"
+            )
+
+    copied_partial_files: list[tuple[Path, Path]] = []
+
+    try:
+        for source_component in local_components:
+            final_component = destination_shapefile.with_suffix(
+                source_component.suffix
+            )
+            partial_component = final_component.with_name(
+                f".{final_component.name}.{uuid.uuid4().hex}.partial"
+            )
+
+            shutil.copy2(source_component, partial_component)
+            copied_partial_files.append(
+                (partial_component, final_component)
+            )
+
+        # Only begin exposing final filenames after every component
+        # has copied successfully.
+        for partial_component, final_component in copied_partial_files:
+            os.replace(partial_component, final_component)
+
+    except Exception:
+        for partial_component, _ in copied_partial_files:
+            partial_component.unlink(missing_ok=True)
+        raise
+
+
+def staged_write(
+    destination: str | os.PathLike,
+    writer: Callable[..., Any],
+    *,
+    writer_args: tuple[Any, ...] = (),
+    writer_kwargs: dict[str, Any] | None = None,
+    network_roots: Iterable[
+        str | os.PathLike
+    ] = DEFAULT_NETWORK_ROOTS,
+    overwrite: bool = True,
+    force_staging: bool = False,
+) -> Path:
+    """
+    Write locally and then copy the completed output to its destination.
+
+    Parameters
+    ----------
+    destination:
+        Final file or directory path.
+    writer:
+        Callable whose first argument is the output path.
+    writer_args:
+        Additional positional arguments passed to ``writer``.
+    writer_kwargs:
+        Additional keyword arguments passed to ``writer``.
+    network_roots:
+        Mapped-drive roots that should be treated as network storage.
+    overwrite:
+        Whether an existing destination can be replaced.
+    force_staging:
+        Stage locally even when the destination is local.
+
+    Returns
+    -------
+    pathlib.Path
+        Final destination path.
+    """
+    destination = Path(destination)
+    writer_kwargs = dict(writer_kwargs or {})
+
+    should_stage = force_staging or is_network_path(
+        destination,
+        network_roots=network_roots,
+    )
+
+    if not should_stage:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        writer(destination, *writer_args, **writer_kwargs)
+        return destination
+
+    with tempfile.TemporaryDirectory(
+        prefix="python_staged_write_"
+    ) as temp_directory:
+        temp_directory = Path(temp_directory)
+        local_output = temp_directory / destination.name
+
+        writer(local_output, *writer_args, **writer_kwargs)
+
+        if not local_output.exists():
+            # Shapefiles can require component-based validation.
+            is_shapefile = destination.suffix.lower() == ".shp"
+
+            if not is_shapefile:
+                raise FileNotFoundError(
+                    "The writer completed without producing the expected "
+                    f"output: {local_output}"
+                )
+
+        if destination.suffix.lower() == ".shp":
+            _copy_shapefile_safely(
+                local_output,
+                destination,
+                overwrite=overwrite,
+            )
+        elif local_output.is_dir():
+            _copy_directory_safely(
+                local_output,
+                destination,
+                overwrite=overwrite,
+            )
+        else:
+            _copy_file_safely(
+                local_output,
+                destination,
+                overwrite=overwrite,
+            )
+
+    return destination

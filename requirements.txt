@@ -1,0 +1,5 @@
+# requirements
+pandas
+geopandas
+openpyxl  # for pandas .to_excel() -- make optional?
+pyarrow  # for pandas .to_parquet() -- make optional?

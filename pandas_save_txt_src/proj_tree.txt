@@ -1,0 +1,6 @@
+src/
+└── pandas_save/
+    ├── __init__.py -> pandas_save____init__.txt
+    ├── __main__.py -> pandas_save____main__.txt
+    ├── api.py -> pandas_save__api.txt
+    └── core.py -> pandas_save__core.txt

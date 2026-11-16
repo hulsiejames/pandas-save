@@ -1,0 +1,19 @@
+# package linters
+ruff>=0.17.1
+pylint>=4.1.3
+mypy>=2.4.0
+mypy_extensions>=1.1.0
+
+# Testing
+pytest>=9.1.1
+pytest-cov>=7.1
+pytest-xdist>=3.8
+
+# edit_install
+versioningit>=3.3.0
+
+# requirements
+pandas
+geopandas
+openpyxl  # for pandas .to_excel() -- make optional?
+pyarrow  # for pandas .to_parquet() -- make optional?
